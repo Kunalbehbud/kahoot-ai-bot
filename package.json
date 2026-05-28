@@ -1,0 +1,18 @@
+{
+  "name": "kahoot-ai-bot",
+  "version": "1.0.0",
+  "description": "AI-powered Kahoot bot - auto-answers using LLM",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "kahoot.js-latest": "^1.0.9",
+    "@google/generative-ai": "^0.21.0",
+    "openai": "^4.0.0",
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.0",
+    "screenshot-desktop": "^1.15.0"
+  }
+}
