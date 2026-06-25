@@ -7,6 +7,7 @@ let geminiModel = null;
 let fallbackModel = null;
 let openaiClient = null;
 let genAIInstance = null;
+let forceFastModel = false; // "S" tuşu için hızlı model (Flash) flag'i
 
 // ═══ Tüm güvenlik filtreleri kapalı ═══
 // Tarihî sorularda savaş/şiddet/qətliam kelimeleri güvenlik filtresini tetikliyordu → boş cevap
@@ -94,6 +95,14 @@ export function initAI() {
 }
 
 /**
+ * "S" tuşu ile model hızını (Zeki/Hızlı) değiştirir
+ */
+export function toggleFastMode() {
+  forceFastModel = !forceFastModel;
+  return forceFastModel;
+}
+
+/**
  * Gemini API çağrısı — timeout + fallback + retry
  * Tüm hata senaryolarını merkezi olarak yönetir:
  *   - 503 Yoğunluk → anında yedek model
@@ -104,23 +113,27 @@ export function initAI() {
  */
 async function callGemini(content) {
   // ─── 1. Ana model ───
-  try {
-    const result = await withTimeout(geminiModel.generateContent(content), API_TIMEOUT_MS);
-    const text = result.response.text().trim();
-    if (text.length > 0) return text;
-    log.warning('Ana model boş cevap döndü (safety filter?). Yedek modele geçiliyor...');
-  } catch (err) {
-    const msg = err.message || '';
-    if (msg.includes('503') || msg.includes('overloaded') || msg.includes('high demand')) {
-      log.warning('503 Yoğunluk. Yedek modele geçiliyor...');
-    } else if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
-      log.warning('Rate limit (429). 2s bekleniyor...');
-      await new Promise(r => setTimeout(r, 2000));
-    } else if (msg.includes('TIMEOUT')) {
-      log.warning(`API ${API_TIMEOUT_MS}ms içinde yanıt vermedi. Yedek modele geçiliyor...`);
-    } else {
-      log.error(`Ana model hatası: ${msg}`);
+  if (!forceFastModel) {
+    try {
+      const result = await withTimeout(geminiModel.generateContent(content), API_TIMEOUT_MS);
+      const text = result.response.text().trim();
+      if (text.length > 0) return text;
+      log.warning('Ana model boş cevap döndü (safety filter?). Yedek modele geçiliyor...');
+    } catch (err) {
+      const msg = err.message || '';
+      if (msg.includes('503') || msg.includes('overloaded') || msg.includes('high demand')) {
+        log.warning('503 Yoğunluk. Yedek modele geçiliyor...');
+      } else if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+        log.warning('Rate limit (429). 2s bekleniyor...');
+        await new Promise(r => setTimeout(r, 2000));
+      } else if (msg.includes('TIMEOUT')) {
+        log.warning(`API ${API_TIMEOUT_MS}ms içinde yanıt vermedi. Yedek modele geçiliyor...`);
+      } else {
+        log.error(`Ana model hatası: ${msg}`);
+      }
     }
+  } else {
+    log.info('⚡ Hızlı mod (Flash) aktif, ana model atlanıyor...');
   }
 
   // ─── 2. Yedek model (gemini-2.5-flash) ───

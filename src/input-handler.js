@@ -1,5 +1,6 @@
 import readline from 'readline';
 import { log } from './utils.js';
+import { toggleFastMode } from './ai-solver.js';
 
 let manualMode = false;       // N tuşu: kalıcı manuel mod
 let waitingForAnswer = false; // Cevap bekleniyor mu?
@@ -66,6 +67,20 @@ export function startKeyListener() {
       return;
     }
 
+    // ═══ S tuşu = Hızlı Mod (Flash) / Zeki Mod (Pro) geçişi ═══
+    if (ch === 'S') {
+      const isFast = toggleFastMode();
+      console.log('');
+      if (isFast) {
+        log.warning('⚡ HIZLI MOD AKTİF');
+        log.warning('Ana model (Pro) atlanacak, doğrudan Flash modeli kullanılacak.');
+      } else {
+        log.success('🧠 ZEKİ MOD AKTİF');
+        log.success('Ana model (Pro) devrede, Flash modeli yedekte.');
+      }
+      console.log('');
+    }
+
     // ═══ N tuşu = Manuel mod toggle (her zaman) ═══
     if (ch === 'N') {
       manualMode = !manualMode;
@@ -89,8 +104,9 @@ export function startKeyListener() {
   // Başlangıç bilgisi
   console.log('');
   log.info('Tuş kısayolları:');
-  log.info('  N → Manuel/Otomatik mod geçişi');
-  log.info('  M → Tek soru için manuel cevap (AI çöktüğünde)');
+  log.info('  S → ⚡ Hızlı (Flash) / 🧠 Zeki (Pro) model geçişi');
+  log.info('  N → 🖐️ Manuel / 🤖 Otomatik mod geçişi');
+  log.info('  M → ⚠️ Tek soru için manuel cevap (AI çöktüğünde)');
   log.info('  Ctrl+C → Çıkış');
   console.log('');
 }
