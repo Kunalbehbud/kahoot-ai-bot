@@ -4,6 +4,7 @@ import readline from 'readline';
 import chalk from 'chalk';
 import { initAI } from './ai-solver.js';
 import { startKahootBot } from './kahoot-client.js';
+import { startKeyListener } from './input-handler.js';
 import { log } from './utils.js';
 
 const rl = readline.createInterface({
@@ -53,13 +54,16 @@ async function main() {
   log.info('Soru modu: Otomatik (metin varsa → LLM, yoksa → Vision/Screenshot)');
   console.log('');
 
+  // readline kapat, tuş dinleyiciyi başlat
+  rl.close();
+  startKeyListener();
+
   // Botu başlat
   await startKahootBot(parseInt(pin), botName);
 
   // Ctrl+C ile çıkış
   process.on('SIGINT', () => {
     log.warning('\nBot kapatılıyor...');
-    rl.close();
     process.exit(0);
   });
 }

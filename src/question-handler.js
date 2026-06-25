@@ -1,4 +1,5 @@
 import { askLLM, askLLMWithImage } from './ai-solver.js';
+import { isManualMode, waitForManualAnswer, waitForManualConfirm } from './input-handler.js';
 import { log, questionTypeName } from './utils.js';
 import path from 'path';
 import fs from 'fs';
@@ -86,39 +87,85 @@ function parseAnswer(type, llmResponse, choices, numChoices) {
   if (!llmResponse) return null;
 
   const response = llmResponse.trim();
-  // Son satırı al (chain-of-thought: model düşünür, son satırda cevap verir)
+  if (response.length === 0) return null;
+
+  // Son satırı al
   const lines = response.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   const lastLine = lines[lines.length - 1] || response;
   const lastLineUpper = lastLine.toUpperCase();
+  const responseUpper = response.toUpperCase();
+  const maxLetter = String.fromCharCode(64 + numChoices); // D for 4 choices
 
   if (type === 'quiz' || type === 'multiple_select_quiz') {
-    // Son satırdaki en son A-F harfini al (böylece "CAVAB: A" içindeki C'ye takılmaz)
-    const letterMatch = lastLineUpper.match(/([A-F])[^A-Z]*$/);
+    // Geçerli harf aralığını belirle (4 şık varsa A-D, 6 şık varsa A-F)
+    const validRange = `[A-${maxLetter}]`;
+    const validRegex = new RegExp(validRange);
+
+    // 1. Cevap tam olarak tek bir harf mi? (en ideal durum: "A", "B", "C", "D")
+    if (lastLine.length <= 3) {
+      const singleMatch = lastLineUpper.match(new RegExp(`^(${validRange})[).]?$`));
+      if (singleMatch) {
+        const index = singleMatch[1].charCodeAt(0) - 65;
+        const label = choices.length > index ? choices[index] : `Şık ${index}`;
+        return { type: 'index', value: index, display: `${singleMatch[1]}) ${label}` };
+      }
+    }
+
+    // 2. Son satırdaki en son geçerli harfi al ("CAVAB: A" → A, "SON CAVAB: D" → D)
+    const lastLetterRegex = new RegExp(`(${validRange})[^A-Z]*$`);
+    const letterMatch = lastLineUpper.match(lastLetterRegex);
     if (letterMatch) {
-      const index = letterMatch[1].charCodeAt(0) - 65; // A=0, B=1, ...
+      const index = letterMatch[1].charCodeAt(0) - 65;
       if (index >= 0 && index < numChoices) {
         const label = choices.length > index ? choices[index] : `Şık ${index}`;
         return { type: 'index', value: index, display: `${letterMatch[1]}) ${label}` };
       }
     }
-    // Tüm response'ta harf ara (fallback)
-    const fullMatch = response.toUpperCase().match(/\b([A-F])\)/);
-    if (fullMatch) {
-      const index = fullMatch[1].charCodeAt(0) - 65;
+
+    // 3. "X)" formatında harf ara (tüm response'ta)
+    const parenRegex = new RegExp(`\\b(${validRange})\\)`);
+    const parenMatch = responseUpper.match(parenRegex);
+    if (parenMatch) {
+      const index = parenMatch[1].charCodeAt(0) - 65;
       if (index >= 0 && index < numChoices) {
         const label = choices.length > index ? choices[index] : `Şık ${index}`;
-        return { type: 'index', value: index, display: `${fullMatch[1]}) ${label}` };
+        return { type: 'index', value: index, display: `${parenMatch[1]}) ${label}` };
       }
     }
-    // Cevap metni ile eşleştir
+
+    // 4. Response'taki herhangi tek başına duran geçerli harfi al
+    const anyLetterRegex = new RegExp(`(?:^|\\s)(${validRange})(?:\\s|$|[).,:])`);
+    const anyMatch = responseUpper.match(anyLetterRegex);
+    if (anyMatch) {
+      const index = anyMatch[1].charCodeAt(0) - 65;
+      if (index >= 0 && index < numChoices) {
+        const label = choices.length > index ? choices[index] : `Şık ${index}`;
+        return { type: 'index', value: index, display: `${anyMatch[1]}) ${label}` };
+      }
+    }
+
+    // 5. Cevap metni ile eşleştir (model şıkkın metnini yazmışsa)
     if (choices.length > 0) {
       for (let i = 0; i < choices.length; i++) {
-        if (lastLineUpper.includes(choices[i].toUpperCase())) {
+        if (choices[i] && lastLineUpper.includes(choices[i].toUpperCase())) {
           return { type: 'index', value: i, display: `${String.fromCharCode(65 + i)}) ${choices[i]}` };
         }
       }
     }
-    // Fallback: 0
+
+    // 6. Son çare: response'taki İLK geçerli A-F harfini al (herhangi bir konumda)
+    const desperateRegex = new RegExp(validRange);
+    const desperateMatch = responseUpper.match(desperateRegex);
+    if (desperateMatch) {
+      const index = desperateMatch[0].charCodeAt(0) - 65;
+      if (index >= 0 && index < numChoices) {
+        const label = choices.length > index ? choices[index] : `Şık ${index}`;
+        log.warning(`Parse zor oldu, ilk bulunan harf kullanılıyor: ${desperateMatch[0]}`);
+        return { type: 'index', value: index, display: `${desperateMatch[0]}) ${label}` };
+      }
+    }
+
+    // 7. Hiçbir şey bulunamadı → ilk şık
     log.warning('Cevap parse edilemedi, ilk şık seçiliyor.');
     return { type: 'index', value: 0, display: `A) (fallback)` };
   }
@@ -231,17 +278,29 @@ export async function solveQuestion(question, type, numChoices, client) {
   log.divider();
   log.question(`[${questionTypeName(type)}] Soru ${qNum}`);
 
+  // ═══ Soru ve şıkları her zaman göster (hem AI hem manuel mod için) ═══
+  if (questionText && questionText.length > 0) {
+    log.info(`Soru: ${questionText}`);
+  }
+  if (choiceTexts.length > 0) {
+    choiceTexts.forEach((c, i) => {
+      console.log(`   ${String.fromCharCode(65 + i)}) ${c}`);
+    });
+  }
+
   let answer = null;
 
-  if (questionText && questionText.length > 0) {
-    // ═══ TEXT MODU ═══
-    log.info(`Soru: ${questionText}`);
-    if (choiceTexts.length > 0) {
-      choiceTexts.forEach((c, i) => {
-        console.log(`   ${String.fromCharCode(65 + i)}) ${c}`);
-      });
+  // ═══ MANUEL MOD (N tuşuyla aktif edilmişse) ═══
+  if (isManualMode()) {
+    log.warning('🖐️  MANUEL MOD — Cevabı sen seçiyorsun');
+    const letter = await waitForManualAnswer(numChoices);
+    if (letter) {
+      const index = letter.charCodeAt(0) - 65;
+      const label = choiceTexts.length > index ? choiceTexts[index] : `Şık ${index}`;
+      answer = { type: 'index', value: index, display: `${letter}) ${label} [MANUEL]` };
     }
-
+  } else if (questionText && questionText.length > 0) {
+    // ═══ OTOMATİK: TEXT MODU ═══
     const prompt = buildTextPrompt(type, questionText, choiceTexts);
     const startTime = Date.now();
     const llmResponse = await askLLM(prompt);
@@ -250,7 +309,7 @@ export async function solveQuestion(question, type, numChoices, client) {
     log.info(`LLM cevabı (${elapsed}ms): ${llmResponse}`);
     answer = parseAnswer(type, llmResponse, choiceTexts, numChoices);
   } else {
-    // ═══ VISION MODU ═══
+    // ═══ OTOMATİK: VISION MODU ═══
     log.warning('Soru metni yok — Vision moduna geçiliyor...');
     const startTime = Date.now();
     const visionResponse = await solveWithVision(type, numChoices);
@@ -262,14 +321,30 @@ export async function solveQuestion(question, type, numChoices, client) {
     }
   }
 
+  // ═══ CEVAP KONTROLÜ ═══
   if (answer) {
     log.answer(`Seçilen cevap: ${answer.display}`);
   } else {
-    // Fallback: rastgele
-    log.warning('Cevap belirlenemedi! Rastgele seçiliyor...');
-    const randomIdx = Math.floor(Math.random() * numChoices);
-    answer = { type: 'index', value: randomIdx, display: `Rastgele: şık ${randomIdx}` };
-    log.answer(answer.display);
+    // AI çöktü veya manuel modda süre doldu → M tuşu teklifi
+    log.warning('AI cevap üretemedi!');
+    const wantsManual = await waitForManualConfirm(5000);
+
+    if (wantsManual) {
+      // Kullanıcı M'ye bastı → bu soru için manuel
+      const letter = await waitForManualAnswer(numChoices);
+      if (letter) {
+        const index = letter.charCodeAt(0) - 65;
+        const label = choiceTexts.length > index ? choiceTexts[index] : `Şık ${index}`;
+        answer = { type: 'index', value: index, display: `${letter}) ${label} [MANUEL]` };
+      }
+    }
+
+    // Hâlâ cevap yoksa → rastgele (son çare)
+    if (!answer) {
+      const randomIdx = Math.floor(Math.random() * numChoices);
+      answer = { type: 'index', value: randomIdx, display: `Rastgele: şık ${randomIdx}` };
+      log.warning(`Rastgele seçildi: ${answer.display}`);
+    }
   }
 
   return answer;

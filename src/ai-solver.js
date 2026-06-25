@@ -1,11 +1,39 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
 import OpenAI from 'openai';
 import fs from 'fs';
 import { log } from './utils.js';
 
 let geminiModel = null;
+let fallbackModel = null;
 let openaiClient = null;
 let genAIInstance = null;
+
+// ═══ Tüm güvenlik filtreleri kapalı ═══
+// Tarihî sorularda savaş/şiddet/qətliam kelimeleri güvenlik filtresini tetikliyordu → boş cevap
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+];
+
+// ═══ Sistem komutu: modelin SADECE harf/kelime yazmasını garanti eder ═══
+const SYSTEM_INSTRUCTION = 'Sən quiz yarışması cavablayan botsun. HƏR ZAMAN YALNIZ cavab hərfini yaz (A, B, C, D, E və ya F). Heç bir izahat vermə, cümlə qurma, yalnız TƏK BİR HƏRF yaz.';
+
+// ═══ API zaman aşımı (ms) ═══
+const API_TIMEOUT_MS = parseInt(process.env.API_TIMEOUT_MS) || 10000;
+
+/**
+ * Promise timeout sarmalayıcısı
+ * Verilen sürede cevap gelmezse hata fırlatır
+ */
+function withTimeout(promise, ms) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`TIMEOUT_${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
 
 /**
  * LLM istemcisini başlat
@@ -17,19 +45,38 @@ export function initAI() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'your_gemini_api_key_here') {
       log.error('.env dosyasına GEMINI_API_KEY eklemelisin!');
-      log.info('https://aistudio.google.com/apikey adresinden ücretsiz key al.');
+      log.info('https://aistudio.google.com/apikey adresinden key al.');
       process.exit(1);
     }
     genAIInstance = new GoogleGenerativeAI(apiKey);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+
+    // ═══ Ana model (gemini-3.5-flash) ═══
     geminiModel = genAIInstance.getGenerativeModel({
       model: modelName,
+      systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
-        maxOutputTokens: 30,
+        maxOutputTokens: 150,
         temperature: 0,
+        thinkingConfig: { thinkingBudget: 2048 },
       },
+      safetySettings: SAFETY_SETTINGS,
     });
+
+    // ═══ Yedek model (her zaman hazır, oluşturma gecikmesi yok) ═══
+    fallbackModel = genAIInstance.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      systemInstruction: SYSTEM_INSTRUCTION,
+      generationConfig: {
+        maxOutputTokens: 150,
+        temperature: 0,
+        thinkingConfig: { thinkingBudget: 1024 },
+      },
+      safetySettings: SAFETY_SETTINGS,
+    });
+
     log.success(`Gemini başlatıldı (model: ${modelName})`);
+    log.info(`Yedek model: gemini-2.5-flash | Timeout: ${API_TIMEOUT_MS}ms`);
   } else if (provider === 'openai') {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey || apiKey === 'your_openai_api_key_here') {
@@ -45,6 +92,52 @@ export function initAI() {
 }
 
 /**
+ * Gemini API çağrısı — timeout + fallback + retry
+ * Tüm hata senaryolarını merkezi olarak yönetir:
+ *   - 503 Yoğunluk → anında yedek model
+ *   - 429 Rate limit → 2s bekle, yedek model
+ *   - Timeout → anında yedek model
+ *   - Boş cevap (safety filter) → yedek model
+ *   - Yedek de başarısız → null döner
+ */
+async function callGemini(content) {
+  // ─── 1. Ana model ───
+  try {
+    const result = await withTimeout(geminiModel.generateContent(content), API_TIMEOUT_MS);
+    const text = result.response.text().trim();
+    if (text.length > 0) return text;
+    log.warning('Ana model boş cevap döndü (safety filter?). Yedek modele geçiliyor...');
+  } catch (err) {
+    const msg = err.message || '';
+    if (msg.includes('503') || msg.includes('overloaded') || msg.includes('high demand')) {
+      log.warning('503 Yoğunluk. Yedek modele geçiliyor...');
+    } else if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota')) {
+      log.warning('Rate limit (429). 2s bekleniyor...');
+      await new Promise(r => setTimeout(r, 2000));
+    } else if (msg.includes('TIMEOUT')) {
+      log.warning(`API ${API_TIMEOUT_MS}ms içinde yanıt vermedi. Yedek modele geçiliyor...`);
+    } else {
+      log.error(`Ana model hatası: ${msg}`);
+    }
+  }
+
+  // ─── 2. Yedek model (gemini-2.5-flash) ───
+  try {
+    const result = await withTimeout(fallbackModel.generateContent(content), API_TIMEOUT_MS);
+    const text = result.response.text().trim();
+    if (text.length > 0) {
+      log.info('✔ Yedek model (gemini-2.5-flash) cevap verdi.');
+      return text;
+    }
+    log.warning('Yedek model de boş cevap döndü.');
+  } catch (err) {
+    log.error(`Yedek model hatası: ${err.message}`);
+  }
+
+  return null;
+}
+
+/**
  * Metin prompt gönder, cevap al
  */
 export async function askLLM(prompt) {
@@ -52,27 +145,16 @@ export async function askLLM(prompt) {
 
   try {
     if (provider === 'gemini') {
-      try {
-        const result = await geminiModel.generateContent(prompt);
-        return result.response.text().trim();
-      } catch (err) {
-        if (err.message && (err.message.includes('503') || err.message.includes('high demand') || err.message.includes('overloaded'))) {
-          log.warning('Gemini modeli şu an yoğun (503). Hızlıca gemini-2.5-flash modeline geçiliyor...');
-          const fallbackModel = genAIInstance.getGenerativeModel({
-            model: 'gemini-2.5-flash',
-            generationConfig: { maxOutputTokens: 30, temperature: 0 },
-          });
-          const result = await fallbackModel.generateContent(prompt);
-          return result.response.text().trim();
-        }
-        throw err;
-      }
+      return await callGemini(prompt);
     } else {
       const model = process.env.OPENAI_MODEL || 'gpt-4o';
       const result = await openaiClient.chat.completions.create({
         model,
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 30,
+        messages: [
+          { role: 'system', content: SYSTEM_INSTRUCTION },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 50,
         temperature: 0,
       });
       return result.choices[0].message.content.trim();
@@ -100,26 +182,13 @@ export async function askLLMWithImage(imagePath, prompt) {
           mimeType: 'image/png',
         },
       };
-      try {
-        const result = await geminiModel.generateContent([prompt, imagePart]);
-        return result.response.text().trim();
-      } catch (err) {
-        if (err.message && (err.message.includes('503') || err.message.includes('high demand') || err.message.includes('overloaded'))) {
-          log.warning('Vision: Gemini modeli şu an yoğun (503). Hızlıca gemini-2.5-flash modeline geçiliyor...');
-          const fallbackModel = genAIInstance.getGenerativeModel({
-            model: 'gemini-2.5-flash',
-            generationConfig: { maxOutputTokens: 30, temperature: 0 },
-          });
-          const result = await fallbackModel.generateContent([prompt, imagePart]);
-          return result.response.text().trim();
-        }
-        throw err;
-      }
+      return await callGemini([prompt, imagePart]);
     } else {
       const model = process.env.OPENAI_MODEL || 'gpt-4o';
       const result = await openaiClient.chat.completions.create({
         model,
         messages: [
+          { role: 'system', content: SYSTEM_INSTRUCTION },
           {
             role: 'user',
             content: [
