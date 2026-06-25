@@ -300,7 +300,10 @@ export async function solveQuestion(question, type, numChoices, client) {
       const label = choiceTexts.length > index ? choiceTexts[index] : `Şık ${index}`;
       answer = { type: 'index', value: index, display: `${letter}) ${label} [MANUEL]` };
     }
-  } else if (questionText && questionText.length > 0) {
+  } else if (questionText && questionText.length > 0 && 
+             !questionText.toLowerCase().includes('sual no') && 
+             !questionText.toLowerCase().includes('şəkildə') && 
+             questionText.trim().length > 3) {
     // ═══ OTOMATİK: TEXT MODU ═══
     const prompt = buildTextPrompt(type, questionText, choiceTexts);
     const startTime = Date.now();
@@ -311,7 +314,7 @@ export async function solveQuestion(question, type, numChoices, client) {
     answer = parseAnswer(type, llmResponse, choiceTexts, numChoices);
   } else {
     // ═══ OTOMATİK: VISION MODU ═══
-    log.warning('Soru metni yok — Vision moduna geçiliyor...');
+    log.warning('Soru metni yok veya jenerik (sual NO vb.) — Vision moduna geçiliyor...');
     const startTime = Date.now();
     const visionResponse = await solveWithVision(type, numChoices);
     const elapsed = Date.now() - startTime;
