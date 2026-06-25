@@ -35,11 +35,12 @@ function buildTextPrompt(type, questionText, choices) {
     const choiceStr = choices
       .map((c, i) => `${choiceLabels[i]}) ${c}`)
       .join('\n');
+    const maxLetter = choiceLabels[choices.length - 1] || 'D';
     return `Sual: ${questionText}
 
 ${choiceStr}
 
-Ən doğru cavabın hərfini yaz. YALNIZ bir hərf (A, B, C və ya D).`;
+Ən doğru cavabın hərfini yaz. YALNIZ bir hərf (A-${maxLetter}).`;
   }
 
   if (type === 'true_false') {

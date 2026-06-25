@@ -34,15 +34,29 @@ export async function startKahootBot(gamePin, botName) {
   });
 
   // 2FA gerekiyor
-  client.on('TwoFactorReset', () => {
+  client.on('TwoFactorReset', async () => {
     log.warning('⚠️  2FA kodu sıfırlandı! Host ekranındaki sırayı gir.');
     log.info('Renk sırası (0=kırmızı, 1=mavi, 2=sarı, 3=yeşil)');
     log.info('Örnek: 0,1,2,3 gir ve Enter\'a bas');
 
-    // stdin'den 2FA kodunu oku
-    process.stdin.once('data', (data) => {
-      const input = data.toString().trim();
-      const steps = input.split(',').map(n => parseInt(n.trim()));
+    // Raw mode'u geçici olarak kapat (readline ile satır girişi için)
+    if (process.stdin.isTTY && process.stdin.isRaw) {
+      process.stdin.setRawMode(false);
+    }
+
+    const rl2fa = (await import('readline')).default.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl2fa.question('  2FA Kodu: ', (input) => {
+      rl2fa.close();
+      // Raw mode'u tekrar aç
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+      }
+
+      const steps = input.trim().split(',').map(n => parseInt(n.trim()));
       if (steps.length === 4 && steps.every(n => n >= 0 && n <= 3)) {
         client.answerTwoFactorAuth(steps).then(() => {
           log.success('2FA başarılı!');

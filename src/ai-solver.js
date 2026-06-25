@@ -52,25 +52,27 @@ export function initAI() {
     const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
 
     // ═══ Ana model (gemini-3.5-flash) ═══
+    // thinkingBudget: 1024 → quiz sorusu için yeterli düşünme, hız kaybı minimum
     geminiModel = genAIInstance.getGenerativeModel({
       model: modelName,
       systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
         maxOutputTokens: 150,
         temperature: 0,
-        thinkingConfig: { thinkingBudget: 2048 },
+        thinkingConfig: { thinkingBudget: 1024 },
       },
       safetySettings: SAFETY_SETTINGS,
     });
 
     // ═══ Yedek model (her zaman hazır, oluşturma gecikmesi yok) ═══
+    // thinkingBudget: 512 → yedek model mümkün olduğunca hızlı olmalı
     fallbackModel = genAIInstance.getGenerativeModel({
       model: 'gemini-2.5-flash',
       systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
         maxOutputTokens: 150,
         temperature: 0,
-        thinkingConfig: { thinkingBudget: 1024 },
+        thinkingConfig: { thinkingBudget: 512 },
       },
       safetySettings: SAFETY_SETTINGS,
     });
